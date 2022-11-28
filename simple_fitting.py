@@ -6,19 +6,16 @@
 
 # have not included an R1 change due to hypoxia...
 
-from math import pi
-import numpy as np
-import nibabel as nib
 import argparse
+from math import pi
+#import cv2 as cv
+#import matplotlib.pyplot as plt ... not installed (properly)
+import nibabel as nib
+import numpy as np
 from numpy.lib.npyio import zipfile_factory
+from scipy import interpolate, linalg, sparse
+import os
 
-from scipy import interpolate
-from scipy import linalg
-from scipy import sparse
-
-import cv2 as cv
-
-import matplotlib.pyplot as plt
 
 def parse_cmdln():
     parser=argparse.ArgumentParser()
@@ -27,6 +24,8 @@ def parse_cmdln():
     parser.add_argument("-te2","--te2_file", help="bold (TE2) filename")
     parser.add_argument("-m0","--m0_file", help="M0 filename")
     parser.add_argument("-mas","--mas_file", help=" brain mask filename")
+
+    parser.add_argument("-out","--out_folder", help=" output folder name")
 
     parser.add_argument("-hb","--hb_value", help=" hb value in g/dL (e.g. 14)")
     parser.add_argument("-pao20","--pao20_value", help="pao20 value mmHg")
@@ -43,6 +42,8 @@ def parse_cmdln():
         raise Exception("M0 filename must be specified using -m0")
     if args.mas_file==None:
         raise Exception("Brain mask filename must be specified using -mas")
+    if args.out_folder==None:
+        raise Exception("Output Folder must be specified using -out")
     if args.hb_value==None:
         raise Exception("hb_value must be specified using -hb")
     if args.pao20_value==None:
@@ -77,7 +78,13 @@ def process_cmdln(args):
     except Exception as error:
         print(error)
         raise SystemExit(0)
-    return(te1_data,te2_data,m0_data,mas_data,mas_img, float (args.hb_value), float(args.pao20_value), float(args.pao2_value))
+    if os.path.exists(args.out_folder):
+        print('output folder already exists')
+        raise SystemExit(0) 
+    else:
+        os.makedirs(args.out_folder)
+
+    return(te1_data,te2_data,m0_data,mas_data,mas_img, float (args.hb_value), float(args.pao20_value), float(args.pao2_value), args.out_folder)
 
 def create_HP_filt(flength,cutoff,TR):
     cut=cutoff/TR
@@ -112,7 +119,7 @@ def calc_CaO2(PaO2,Hb):
 # get arguments from the command line
 args=parse_cmdln()
 # load 4D MRI data from the command line
-te1_data,te2_data,m0_data,mas_data,mas_img , Hb, PaO20, PaO2  = process_cmdln(args)
+te1_data,te2_data,m0_data,mas_data,mas_img , Hb, PaO20, PaO2 , out_folder = process_cmdln(args)
 
 if (mas_data.ndim)>3:
     mask=mas_data[:,:,:,0]
@@ -126,7 +133,7 @@ else:
 
 
 def zero_pad_3D_2D( in_array_3D):
-#    #zero pad by 2x 3D data in "D (i.e. slice wise)"
+#   zero pad by 2x 3D data in 2D (i.e. slice wise)"
     k = np.fft.fft2(in_array_3D, axes=(0,1))
     k = np.fft.fftshift(k, axes=(0,1))
     k_pad=np.pad(k, ((int(x_axis/2),int(x_axis/2)), (int(y_axis/2),int(y_axis/2)), (0, 0)), 'constant') # 2d pad of 3d data
@@ -162,7 +169,7 @@ def slice_time_correction( in_4D_data, shift_ms, dexi_tr):
     return(shifted_data)
 
 #slice timing correction for te1 data and te2 data (TR is so long though that this is pretty pointless)
-print('slice timting correction')
+#print('slice timting correction')
 #te1_data = slice_time_correction( te1_data, 50, 4.4)
 #te2_data = slice_time_correction( te2_data, 70, 4.4)
 
@@ -329,13 +336,13 @@ def my_exhaustive_search(cbf0_data, CaO20, CaO2, Hb, TE, p50, h, beta, PmitO2, p
 
         #unscaled cmro2... i.e. no CaO2 contribution as assumed fixed
         #assume flow to CMRO2 coupling is aapproximately 2. i.e 20% change in CBF leads to 10% change in cmro2
-        cmro2_base=oef_local*cbf0_data
-        n_coupling = 2.0 # 2 PET give n = 0.9 to 2.4, mri around 2-4 (my work around 1.5)
-        cmro2_act=(1+(cbf_cbf0-1)/ n_coupling )*cmro2_base # use a fixed cmro2 to cbf coupling of '2
+       # cmro2_base=oef_local*cbf0_data
+       # n_coupling = 2.0 # 2 PET give n = 0.9 to 2.4, mri around 2-4 (my work around 1.5)
+       # cmro2_act=(1+(cbf_cbf0-1)/ n_coupling )*cmro2_base # use a fixed cmro2 to cbf coupling of '2
         
-        cbf_act=cbf_cbf0*cbf0_data
-        oef_act=cmro2_act/cbf_act
-        oef_oef0 = oef_act/oef_local # fractional change in oef
+       # cbf_act=cbf_cbf0*cbf0_data
+       # oef_act=cmro2_act/cbf_act
+       # oef_oef0 = oef_act/oef_local # fractional change in oef
 
       #  M_local=bold / (1- ( cbf_cbf0**0.38 * Dhb**1.3 ) ) # standard calibration parameters
         M_local=bold / (1- ( cbf_cbf0**0.06 * Dhb**1.0 ) ) #alberto simplification for stable fitting  
@@ -345,7 +352,6 @@ def my_exhaustive_search(cbf0_data, CaO20, CaO2, Hb, TE, p50, h, beta, PmitO2, p
       #  M_local=bold / (1- ( cbf_cbf0**0.06 * oef_oef0**(1.0) ) ) # cmro2 coupling (coupling =2) for resting state with Alberto's optimisation
        
  
-
        # diffusion model of M
         SvO2 = (CaO20*(1-oef_local))/(phi*Hb_ml)
         if cbf0_data < 0:
@@ -440,7 +446,7 @@ for ii in range(x_axis):
         for kk in range(no_slices):
 #for ii in range(17,18):
 #    for jj in range(17,18):      
-#       for kk in range(7,8):
+#        for kk in range(7,8):
   
             print('column, row, slice')
             print(ii,jj,kk)
@@ -502,7 +508,6 @@ for ii in range(x_axis):
                 regressor = interp_reg
 
 
-
                 if shift_est[ii,jj,kk] < 0:
 
                     regressor = interp_reg[ 0 - round(shift_est[ii,jj,kk]) : -1]
@@ -525,8 +530,11 @@ for ii in range(x_axis):
                 
                 ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
               #  cbf0_est[ii,jj,kk] = b_asl /1.2# unscaled cbf0 estimate (from regression intercept)
-                cbf0_est[ii,jj,kk] = b_asl /1.0#
-                # use asl equation to scale cbf0
+               # cbf0_est[ii,jj,kk] = b_asl # unscaled cbf0 estimate (from regression intercept)
+                #to do -  use asl equation to scale cbf0
+
+                # n.b. need to add slice timing delay to PLD (1.5 in numerator)
+                cbf0_est[ii,jj,kk] = (6000 * 0.9 * b_asl * np.exp(1.5/1.6)) / (2*0.85*0.9025* 1.6 *m0[ii,jj,kk] * (1-np.exp(-1.5/1.6))  )
  
                 oef_est[ii,jj,kk], MTTcap_est[ii,jj,kk], M_est[ii,jj,kk]  = my_exhaustive_search(cbf0_est[ii,jj,kk], CaO20, CaO2, Hb, GE_TE, P50, h, beta, PmitO2, phi ,rho, ge_est[ii,jj,kk], cbf_cbf0_est[ii,jj,kk], A, k_perm)
                
@@ -625,39 +633,47 @@ def salt_pepper_denoise (oef_data,m0_data):
 
     return(oef_filled, salt_mask, pepper_mask)
 
-# sal and pepper denoising - remove isolated voxels and small clusters
+# salt and pepper denoising - remove isolated voxels and small clusters
+print('salt and pepper denoise')
 oef_est, salt_mask, pepper_mask = salt_pepper_denoise (oef_est,m0)
 
 
 cbf0_est[cbf0_est<0]=0
 cmro2_est= 39.34 * CaO20 * oef_est * cbf0_est
 
-# save data out to nifti files
+# save data out to nifti files 
 empty_header=nib.Nifti1Header()
 
 #salt_mask_img=nib.Nifti1Image(salt_mask, mas_img.affine, empty_header)
 #nib.save(salt_mask_img, 'salt_mask.nii.gz')
 
 MTTcap_est_img=nib.Nifti1Image(MTTcap_est, mas_img.affine, empty_header)
-nib.save(MTTcap_est_img, 'MTTcap_est.nii.gz')
+nib.save( MTTcap_est_img, os.path.join(out_folder, 'MTTcap_est.nii.gz') )
 
 shift_est_img=nib.Nifti1Image(shift_est, mas_img.affine, empty_header)
-nib.save(shift_est_img, 'shift_est.nii.gz')
+#nib.save(shift_est_img, 'shift_est.nii.gz')
+nib.save( shift_est_img, os.path.join(out_folder, 'shift_est.nii.gz') )
 
 ge_est_img=nib.Nifti1Image(ge_est, mas_img.affine, empty_header)
-nib.save(ge_est_img, 'ge_est.nii.gz')
+#nib.save(ge_est_img, 'ge_est.nii.gz')
+nib.save( ge_est_img, os.path.join(out_folder, 'ge_est.nii.gz') )
 
 cbf0_est_img=nib.Nifti1Image(cbf0_est, mas_img.affine, empty_header)
-nib.save(cbf0_est_img, 'cbf0_est.nii.gz')
+#nib.save(cbf0_est_img, 'cbf0_est.nii.gz')
+nib.save( cbf0_est_img, os.path.join(out_folder, 'cbf0_est.nii.gz') )
 
 cbf_cbf0_est_img=nib.Nifti1Image(cbf_cbf0_est, mas_img.affine, empty_header)
-nib.save(cbf_cbf0_est_img, 'cbf_cbf0_est.nii.gz')
+#nib.save(cbf_cbf0_est_img, 'cbf_cbf0_est.nii.gz')
+nib.save( cbf_cbf0_est_img, os.path.join(out_folder, 'cbf_cbf0_est.nii.gz') )
 
 M_est_img=nib.Nifti1Image(M_est, mas_img.affine, empty_header)
-nib.save(M_est_img, 'M_est.nii.gz')
+#nib.save(M_est_img, 'M_est.nii.gz')
+nib.save( M_est_img, os.path.join(out_folder, 'M_est.nii.gz') )
 
 cmro2_est_img=nib.Nifti1Image(cmro2_est, mas_img.affine, empty_header)
-nib.save(cmro2_est_img, 'cmro2_est.nii.gz')
+#nib.save(cmro2_est_img, 'cmro2_est.nii.gz')
+nib.save( cmro2_est_img, os.path.join(out_folder, 'cmro2_est.nii.gz') )
 
 oef_est_img=nib.Nifti1Image(oef_est, mas_img.affine, empty_header)
-nib.save(oef_est_img, 'oef_est.nii.gz')
+#nib.save(oef_est_img, 'oef_est.nii.gz')
+nib.save( oef_est_img, os.path.join(out_folder, 'oef_est.nii.gz') )
