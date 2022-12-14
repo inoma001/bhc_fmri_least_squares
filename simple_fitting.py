@@ -1,21 +1,11 @@
-# new simple fitting approach - first get delay/lag for BOLD response in time domain using corss-correlation - 
-# can look to restrict lag estimates to 'valid range' for no Large vein signals
-# then use that lag estimate to do a regression to see what BOLD CVR looks like
-# then maybe do something similar for CBF data.
-# finally exhustive search or similar to get OEF with fixed PmitO2 = 10
-
-# have not included an R1 change due to hypoxia...
-
+# exhaustive search for M dilution matching M diffusion to get OEF - fixed PmitO2
 import argparse
-from math import pi
-#import cv2 as cv
-#import matplotlib.pyplot as plt ... not installed (properly)
 import nibabel as nib
 import numpy as np
-from numpy.lib.npyio import zipfile_factory
 from scipy import interpolate, linalg, sparse
 import os
-
+import warnings
+warnings.filterwarnings('ignore')
 
 def parse_cmdln():
     parser=argparse.ArgumentParser()
@@ -168,44 +158,6 @@ def slice_time_correction( in_4D_data, shift_ms, dexi_tr):
 
     return(shifted_data)
 
-#slice timing correction for te1 data and te2 data (TR is so long though that this is pretty pointless)
-#print('slice timting correction')
-#te1_data = slice_time_correction( te1_data, 50, 4.4)
-#te2_data = slice_time_correction( te2_data, 70, 4.4)
-
-
-#  zero padding data in fourier domain to increase in-plane spatial resolution.... needed to use closing operation to remove tiny 'holes' in oef map
-#print('zero padding data in 2D')
-#x_axis,y_axis,no_slices,datapoints=np.shape(te1_data)
-
-#te1_pad=np.zeros([x_axis*2, y_axis*2, no_slices,datapoints]) # pre-allocate array
-#te2_pad=np.zeros([x_axis*2, y_axis*2, no_slices,datapoints]) # pre-allocate array
-
-#for ii in range(datapoints):
-#    te1_pad[:,:,:,ii] = zero_pad_3D_2D( te1_data[:,:,:,ii])
-#    te2_pad[:,:,:,ii] = zero_pad_3D_2D( te2_data[:,:,:,ii])
-
-#te1_data=np.copy(te1_pad)
-#te2_data=np.copy(te2_pad)
-#mask = zero_pad_3D_2D( mask)
-#m0 = zero_pad_3D_2D( m0)
-
-# 2D smoothing of the data (gaussian should give higher SNR... but NLM should avoid smoothing in macro vessels etc.)
-
-# from 'Combined Denoising and Suppression of Transient Artifacts in Arterial Spin Labeling MRI Using Deep Learning'
-#  For the Gaussian filter, the optimum window size was five voxels (standard deviation = 1.9 mm). For the NLM filter, 
-# the optimum patch size was six voxels, the optimum patch distance was 13 voxels, and optimum cutoff distance was 6.0.
-
-#print('spatial smoothing') # doesn't reduce fitting errors and makes salt and pepper noise harder to isolate!
-#for ii in range(no_slices): 
-#    for jj in range(datapoints):
-        #te1_data[:,:,ii,jj] = cv.GaussianBlur(te1_data[:,:,ii,jj],(3,3),0)
-        #te2_data[:,:,ii,jj] = cv.GaussianBlur(te2_data[:,:,ii,jj],(3,3),0)
-
-      #  te1_data[:,:,ii,jj] = cv.GaussianBlur(te1_data[:,:,ii,jj],(0,0),0.1) #sigma =0.1
-        #te2_data[:,:,ii,jj] = cv.GaussianBlur(te2_data[:,:,ii,jj],(0,0),0.1)
-    
-       
 
 #sequence parameters
 GE_TE = 30/1000
@@ -222,7 +174,7 @@ rho = 2.5
 # rho should be between 2 and 3, 2.5 matches a,v,cp fractions of approx  0.21,  0.33,  0.46 as per liu et al 2016 'Quantitative Measurement of Cerebral Blood Volume using Velocity-Selective Pulse Trains'
 # and van zijl et al 1998 'Quantitative assessment of blood flow, blood volume and blood oxygenation effects in functional magnetic resonance imaging'
 
-P50 = 26
+p50 = 26
 h = 2.84 # as per Gjedde 2002 'Cerebral Blood Flow Change in Arterial Hypoxemia Is Consistent withNegligible Oxygen Tension in Brain Mitochondria'
 k_perm = 3.0  
 
@@ -233,10 +185,8 @@ PmitO2 = 0 # 10
 
 
 # need to change calibration factor to get correct OEF from resting data with the current code...
-
 CaO20=calc_CaO2(PaO20,Hb)
 CaO2=calc_CaO2(PaO2,Hb)
-
 
 # calculate surround subtraction data to get perfusion signal
 x_axis,y_axis,no_slices,datapoints=np.shape(te1_data)
@@ -312,7 +262,11 @@ demean_bold=np.nan_to_num(demean_bold) # this is the de-meaned fractional change
 
 def my_exhaustive_search(cbf0_data, CaO20, CaO2, Hb, TE, p50, h, beta, PmitO2, phi ,rho, bold, cbf_cbf0, A, k_perm ):
     
-    offset = 40 # 40  ... as expect inflection point for dilution model a little less than this. (3) offset from zero to skip infelction point in dilution BOLD model (caused by hypoxia during breath-hold)
+    # limit GE signal change (BOLD) to 7.5%? - as this will limit macrovascular contamination but still allow for large variation in microvascular blood volume
+    if bold > 0.075 :
+        bold = 0.075
+
+    offset = 40 # 40  ... as expect inflection point for dilution model a little less than this. offset from zero to skip infelction point in dilution BOLD model (caused by hypoxia during breath-hold)
     M_diff=np.zeros(1001 - offset)
     m_difference=np.zeros(1001 - offset)
     MTTcap=np.zeros(1001 - offset)
@@ -323,7 +277,7 @@ def my_exhaustive_search(cbf0_data, CaO20, CaO2, Hb, TE, p50, h, beta, PmitO2, p
         oef_local = ii/1000 # convert data range to (0.002) to 1.0
  
         # Gauthier and Hoge 2012 dilution model of M
-        Hb_ml = Hb/100 # create Hb veriable in ml Hb/ml blood (fractional Hb content)
+        Hb_ml = Hb/100 # create Hb variable in ml Hb/ml blood (fractional Hb content)
         
         #split deoxy dilution equation into seperate parts for clarity
         tl = (CaO20 * oef_local) / (phi*Hb_ml)
@@ -334,24 +288,8 @@ def my_exhaustive_search(cbf0_data, CaO20, CaO2, Hb, TE, p50, h, beta, PmitO2, p
 
         Dhb = lhs + rhs
 
-        #unscaled cmro2... i.e. no CaO2 contribution as assumed fixed
-        #assume flow to CMRO2 coupling is aapproximately 2. i.e 20% change in CBF leads to 10% change in cmro2
-       # cmro2_base=oef_local*cbf0_data
-       # n_coupling = 2.0 # 2 PET give n = 0.9 to 2.4, mri around 2-4 (my work around 1.5)
-       # cmro2_act=(1+(cbf_cbf0-1)/ n_coupling )*cmro2_base # use a fixed cmro2 to cbf coupling of '2
-        
-       # cbf_act=cbf_cbf0*cbf0_data
-       # oef_act=cmro2_act/cbf_act
-       # oef_oef0 = oef_act/oef_local # fractional change in oef
+        M_local=bold / ( 1 - ( cbf_cbf0**0.06 * Dhb**1.0 ) ) #alberto simplification for stable fitting  (dilution model)
 
-      #  M_local=bold / (1- ( cbf_cbf0**0.38 * Dhb**1.3 ) ) # standard calibration parameters
-        M_local=bold / (1- ( cbf_cbf0**0.06 * Dhb**1.0 ) ) #alberto simplification for stable fitting  
-      #  M_local=bold / (1- ( cbf_cbf0**(0.38-1.3 )) ) # standard bold equation 
-        
-        #for resting state cmro2 - need a command line flag for breath-hold or resting state data so know which equation to use
-      #  M_local=bold / (1- ( cbf_cbf0**0.06 * oef_oef0**(1.0) ) ) # cmro2 coupling (coupling =2) for resting state with Alberto's optimisation
-       
- 
        # diffusion model of M
         SvO2 = (CaO20*(1-oef_local))/(phi*Hb_ml)
         if cbf0_data < 0:
@@ -361,8 +299,9 @@ def my_exhaustive_search(cbf0_data, CaO20, CaO2, Hb, TE, p50, h, beta, PmitO2, p
             cbv_dhb = (rho * CaO20 * 39.34 * cbf0_data * oef_local) / (k_perm * (p50*( (2/oef_local-1)**(1/h) ) - PmitO2) )
         else :
             cbv_dhb = 0
+        
+        M_diff[ii-offset] = TE * A * (cbv_dhb/100) * ( (1-SvO2) * Hb) ** beta
 
-        M_diff[ii-offset] = TE * A * (cbv_dhb/100) * ( (1-SvO2) * Hb) ** beta   
         m_difference[ii-offset]=np.absolute(M_diff[ii-offset]-M_local) # difference between diffusion model of M and dilution model of M
         
         if cbf0_data != 0:
@@ -439,17 +378,13 @@ shift_est = np.empty([x_axis,y_axis,no_slices])
 cmro2_est = np.empty([x_axis,y_axis,no_slices])
 
 
-
-   
 for ii in range(x_axis):
     for jj in range(y_axis):      
         for kk in range(no_slices):
-#for ii in range(17,18):
-#    for jj in range(17,18):      
-#        for kk in range(7,8):
   
             print('column, row, slice')
             print(ii,jj,kk)
+            pld_slice = pld + kk*0.04 # pld corrected for slice timings
       
           #  if (mask[ii,jj,kk]>0 and m0[ii,jj,kk] > 6000 ) : # need cbf0 > a small value to keep estimates to tissue with enough ASL snr.
             if (m0[ii,jj,kk] > 6000   ) : # thresholds need to be automated
@@ -528,15 +463,10 @@ for ii in range(x_axis):
                 m_asl,b_asl = np.polyfit(regressor, y_data_asl, 1) 
                 cbf_cbf0_est[ii,jj,kk] = 1 + m_asl
                 
-                ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
-              #  cbf0_est[ii,jj,kk] = b_asl /1.2# unscaled cbf0 estimate (from regression intercept)
-               # cbf0_est[ii,jj,kk] = b_asl # unscaled cbf0 estimate (from regression intercept)
-                #to do -  use asl equation to scale cbf0
-
-                # n.b. need to add slice timing delay to PLD (1.5 in numerator)
-                cbf0_est[ii,jj,kk] = (6000 * 0.9 * b_asl * np.exp(1.5/1.6)) / (2*0.85*0.9025* 1.6 *m0[ii,jj,kk] * (1-np.exp(-1.5/1.6))  )
- 
-                oef_est[ii,jj,kk], MTTcap_est[ii,jj,kk], M_est[ii,jj,kk]  = my_exhaustive_search(cbf0_est[ii,jj,kk], CaO20, CaO2, Hb, GE_TE, P50, h, beta, PmitO2, phi ,rho, ge_est[ii,jj,kk], cbf_cbf0_est[ii,jj,kk], A, k_perm)
+                #quant cbf0 calculation including reductin in inversion efficiency due to to BGS inversion pulses
+                cbf0_est[ii,jj,kk] = (6000 * 0.9 * b_asl * np.exp(pld_slice/1.65)) / (2*0.85*0.9025* 1.6 *m0[ii,jj,kk] * (1-np.exp(-tag/1.65))  )
+                #exhaustive search for OEF value
+                oef_est[ii,jj,kk], MTTcap_est[ii,jj,kk], M_est[ii,jj,kk]  = my_exhaustive_search(cbf0_est[ii,jj,kk], CaO20, CaO2, Hb, GE_TE, p50, h, beta, PmitO2, phi ,rho, ge_est[ii,jj,kk], cbf_cbf0_est[ii,jj,kk], A, k_perm)
                
             else:
                 shift_est[ii,jj,kk] = 0
@@ -641,6 +571,18 @@ oef_est, salt_mask, pepper_mask = salt_pepper_denoise (oef_est,m0)
 cbf0_est[cbf0_est<0]=0
 cmro2_est= 39.34 * CaO20 * oef_est * cbf0_est
 
+# should re-calculate MTTcap and M from denoised oef (cmro2) as this could give a better map
+# diffusion model of M
+Hb_ml = Hb/100 # create Hb variable in ml Hb/ml blood (fractional Hb content)
+
+
+#with np.errstate(divide='ignore', invalid='ignore'):
+SvO2 = (CaO20*(1-oef_est))/(phi*Hb_ml)
+cbv_dhb = (rho * CaO20 * 39.34 * cbf0_est * oef_est) / (k_perm * (p50*( (2/oef_est-1)**(1/h) ) - PmitO2) )
+M_diff = GE_TE * A * (cbv_dhb/100) * ( (1-SvO2) * Hb) ** beta   
+MTTcap_est = 60 * (cbv_dhb/rho)/cbf0_est # re-calculate MTTcap 
+
+
 # save data out to nifti files 
 empty_header=nib.Nifti1Header()
 
@@ -651,29 +593,22 @@ MTTcap_est_img=nib.Nifti1Image(MTTcap_est, mas_img.affine, empty_header)
 nib.save( MTTcap_est_img, os.path.join(out_folder, 'MTTcap_est.nii.gz') )
 
 shift_est_img=nib.Nifti1Image(shift_est, mas_img.affine, empty_header)
-#nib.save(shift_est_img, 'shift_est.nii.gz')
 nib.save( shift_est_img, os.path.join(out_folder, 'shift_est.nii.gz') )
 
 ge_est_img=nib.Nifti1Image(ge_est, mas_img.affine, empty_header)
-#nib.save(ge_est_img, 'ge_est.nii.gz')
 nib.save( ge_est_img, os.path.join(out_folder, 'ge_est.nii.gz') )
 
 cbf0_est_img=nib.Nifti1Image(cbf0_est, mas_img.affine, empty_header)
-#nib.save(cbf0_est_img, 'cbf0_est.nii.gz')
 nib.save( cbf0_est_img, os.path.join(out_folder, 'cbf0_est.nii.gz') )
 
 cbf_cbf0_est_img=nib.Nifti1Image(cbf_cbf0_est, mas_img.affine, empty_header)
-#nib.save(cbf_cbf0_est_img, 'cbf_cbf0_est.nii.gz')
 nib.save( cbf_cbf0_est_img, os.path.join(out_folder, 'cbf_cbf0_est.nii.gz') )
 
-M_est_img=nib.Nifti1Image(M_est, mas_img.affine, empty_header)
-#nib.save(M_est_img, 'M_est.nii.gz')
+M_est_img=nib.Nifti1Image(M_diff, mas_img.affine, empty_header)
 nib.save( M_est_img, os.path.join(out_folder, 'M_est.nii.gz') )
 
 cmro2_est_img=nib.Nifti1Image(cmro2_est, mas_img.affine, empty_header)
-#nib.save(cmro2_est_img, 'cmro2_est.nii.gz')
 nib.save( cmro2_est_img, os.path.join(out_folder, 'cmro2_est.nii.gz') )
 
 oef_est_img=nib.Nifti1Image(oef_est, mas_img.affine, empty_header)
-#nib.save(oef_est_img, 'oef_est.nii.gz')
 nib.save( oef_est_img, os.path.join(out_folder, 'oef_est.nii.gz') )
