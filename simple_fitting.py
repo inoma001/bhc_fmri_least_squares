@@ -111,6 +111,7 @@ args=parse_cmdln()
 # load 4D MRI data from the command line
 te1_data,te2_data,m0_data,mas_data,mas_img , Hb, PaO20, PaO2 , out_folder = process_cmdln(args)
 
+
 if (mas_data.ndim)>3:
     mask=mas_data[:,:,:,0]
 else:
@@ -178,10 +179,11 @@ p50 = 26
 h = 2.84 # as per Gjedde 2002 'Cerebral Blood Flow Change in Arterial Hypoxemia Is Consistent withNegligible Oxygen Tension in Brain Mitochondria'
 k_perm = 3.0  
 
-A= 10.0 # A p/k = 8.85 when PmitO2=0 from in-vivo calibration in CO2 only paper. implies A = 10 when p (rho)=2.5 and k =3.
+A = 10.62 # A p/k = 8.85 when PmitO2=0 from in-vivo calibration in CO2 only paper. implies A = 10.62 when p (rho)=2.5 and k =3.
 
+alpha = 0.20 # from Chen, J.J., Pike, G.B., 2009. BOLD-specific cerebral blood volume and blood flow changes during neuronal activation in humans. NMR Biomed. 22, 1054–1062.
 beta=1.3
-PmitO2 = 0 # 10 
+PmitO2 = 0 # mmHg 
 
 
 # need to change calibration factor to get correct OEF from resting data with the current code...
@@ -202,8 +204,14 @@ flow_odd=-te1_data[:,:,:,1:-1]+(te1_data[:,:,:,0:-2]+te1_data[:,:,:,2:])/2
 flow_data[:,:,:,1::2]=flow_odd[:,:,:,1::2]
 
 del te1_data
-asl_data = np.copy(flow_data)
+#asl_data = np.copy(flow_data)
 
+#spatial filter asl data
+print('Spatial Smoothing ASL data')
+from scipy.ndimage import gaussian_filter
+for ii in range(no_slices):
+    for jj in range(datapoints):
+        flow_data[:,:,ii,jj] = gaussian_filter(flow_data[:,:,ii,jj], sigma=0.5)
 
 # demean the flow data for before HP filtering (then add back in the mean) - improves edge effeccts in HP filt - gives nice de-trend to match BOLD
 # and model paradigm design
@@ -212,7 +220,7 @@ cut = 50 #.. 50 ... shorter cutoff time reduces edge effects in data - so time a
 # ... maybe should trim beginning and end of data for analysis?
 
 demean_asl = np.empty([x_axis,y_axis,no_slices,datapoints]) # pre-allocate array
-asl_mean = np.mean(flow_data,axis=3)  #avergae along time axis to add back later
+asl_mean = np.mean(flow_data,axis=3)  #average along time axis to add back later
 
 for i in range(datapoints):
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -229,7 +237,7 @@ for i in range(x_axis):
 for i in range(datapoints):
         flow_data[:,:,:,i]=np.multiply(demean_asl[:,:,:,i] + 1, asl_mean)
 
-flow_data=np.nan_to_num(flow_data)
+flow_data = np.nan_to_num(flow_data)
 asl_data = np.copy(flow_data)
 
 
@@ -240,9 +248,18 @@ x_axis,y_axis,no_slices,datapoints=np.shape(te2_data)
 datapoints=datapoints-2 # surround averaging misses first and last point in the vector
 bold_data=np.empty([x_axis,y_axis,no_slices,datapoints]) # pre-allocate array
 bold_data=(te2_data[:,:,:,1:-1]+(te2_data[:,:,:,0:-2]+te2_data[:,:,:,2:])/2)/2
+
+
+print('Spatial Smoothing BOLD data')
+# spatial smoothing
+for ii in range(no_slices):
+    for jj in range(datapoints):
+        bold_data[:,:,ii,jj] = gaussian_filter(bold_data[:,:,ii,jj], sigma=0.5)
+
+
 # demean the bold data for easy HP filtering
 demean_bold = np.empty([x_axis,y_axis,no_slices,datapoints]) # pre-allocate array
-baseline = np.mean(bold_data[:,:,:,0:6],axis=3)
+baseline = np.mean(bold_data[:,:,:,0:6],axis=3) # change in breath-hold protocol could make this not-optimal for baseline?
 
 for i in range(datapoints):
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -262,9 +279,12 @@ demean_bold=np.nan_to_num(demean_bold) # this is the de-meaned fractional change
 
 def my_exhaustive_search(cbf0_data, CaO20, CaO2, Hb, TE, p50, h, beta, PmitO2, phi ,rho, bold, cbf_cbf0, A, k_perm ):
     
-    # limit GE signal change (BOLD) to 7.5%? - as this will limit macrovascular contamination but still allow for large variation in microvascular blood volume
-    if bold > 0.075 :
-        bold = 0.075
+
+    # limit GE signal change (BOLD) to (20%)- as this will limit macrovascular contamination but still allow for large variation in microvascular blood volume
+    if bold > 0.2 :  
+        bold = 0.0  # remove large bold fluctuations as macro vascular
+   
+
 
     offset = 40 # 40  ... as expect inflection point for dilution model a little less than this. offset from zero to skip infelction point in dilution BOLD model (caused by hypoxia during breath-hold)
     M_diff=np.zeros(1001 - offset)
@@ -286,9 +306,8 @@ def my_exhaustive_search(cbf0_data, CaO20, CaO2, Hb, TE, p50, h, beta, PmitO2, p
         lhs= (1/cbf_cbf0)*(tl/blr)
         rhs = tr/blr
 
-        Dhb = lhs + rhs
-
-        M_local=bold / ( 1 - ( cbf_cbf0**0.06 * Dhb**1.0 ) ) #alberto simplification for stable fitting  (dilution model)
+        Dhb = lhs + rhs   
+        M_local=bold / ( 1 - ( cbf_cbf0**alpha * Dhb**beta ) ) 
 
        # diffusion model of M
         SvO2 = (CaO20*(1-oef_local))/(phi*Hb_ml)
@@ -299,8 +318,14 @@ def my_exhaustive_search(cbf0_data, CaO20, CaO2, Hb, TE, p50, h, beta, PmitO2, p
             cbv_dhb = (rho * CaO20 * 39.34 * cbf0_data * oef_local) / (k_perm * (p50*( (2/oef_local-1)**(1/h) ) - PmitO2) )
         else :
             cbv_dhb = 0
+
+        M_diff_local = TE * A * (cbv_dhb/100) * ( (1-SvO2) * Hb) ** beta
+
+        if isinstance(M_diff_local, complex):
+            M_diff_local=0
+
+        M_diff[ii-offset] = M_diff_local
         
-        M_diff[ii-offset] = TE * A * (cbv_dhb/100) * ( (1-SvO2) * Hb) ** beta
 
         m_difference[ii-offset]=np.absolute(M_diff[ii-offset]-M_local) # difference between diffusion model of M and dilution model of M
         
@@ -341,7 +366,7 @@ bold_masked=np.copy(demean_bold)
 for i in range(datapoints):
     asl_masked[:,:,:,i]=np.multiply(valid_mask,asl_masked[:,:,:,i])
     bold_masked[:,:,:,i]=np.multiply(valid_mask,bold_masked[:,:,:,i])
-#set zero vales to nana
+#set zero vales to nan
 asl_masked[asl_masked==0]=np.nan
 bold_masked[bold_masked==0]=np.nan
 
@@ -364,6 +389,10 @@ mean_time= np.divide ( (mean_time-np.mean(mean_time)) , np.std(mean_time)  )
 up_quant=np.quantile(mean_time,0.95)
 reg_vector=mean_time/(2*up_quant)
 
+# show the regressor to make sure it looks correct # comment out for now but very useful check of the data!
+import matplotlib.pyplot as plt
+plt.plot(reg_vector, linestyle = 'dotted')
+plt.show()
 
 # LOOP to calculate voxelwise parameters starts HERE
 
@@ -386,7 +415,6 @@ for ii in range(x_axis):
             print(ii,jj,kk)
             pld_slice = pld + kk*0.04 # pld corrected for slice timings
       
-          #  if (mask[ii,jj,kk]>0 and m0[ii,jj,kk] > 6000 ) : # need cbf0 > a small value to keep estimates to tissue with enough ASL snr.
             if (m0[ii,jj,kk] > 6000   ) : # thresholds need to be automated
 
                 # convert asl data into zero meaned fractional change that can be used with demeaned regressor to calculate the slope and intecept for CBF0 data
@@ -432,7 +460,10 @@ for ii in range(x_axis):
                 cross_vector_concat = np.correlate(bold_asl_concat, reg_concat,   "full") 
 
 
-                window_size = 15 # 10*2.2 = +/-20 seconds search window  (restriction important to localise fit to breath-hold modulation) --  most lag estimates are between +/- 2 seconds so can use a wide window to get best fits... fills in holes but doesn't change most of the fits!
+                window_size = 7 
+
+
+# 7*2.2 = +/-15.4 seconds search window  (restriction important to localise fit to breath-hold modulation) --  most lag estimates are between +/- 2 seconds so can use a wide window to get best fits... fills in holes but doesn't change most of the fits!
                 shift_est[ii,jj,kk]= np.argmax(cross_vector_concat[np.size(reg_concat) - (window_size +2) : np.size(reg_concat) + (window_size + 1 ) ]) - (window_size +1) # get maximum  correlation coefficient within 5 TR's
             
                 # regression with ASL and BOLD data shifted to match the reg_vector (just shift by Whole TR's to start with - not sure if interpolation in time domain would help more - probably a little bit)
@@ -461,9 +492,15 @@ for ii in range(x_axis):
                 ge_est[ii,jj,kk] = m_bold
                
                 m_asl,b_asl = np.polyfit(regressor, y_data_asl, 1) 
+                #limit cbf fractional change to some extreme phys range
+                if m_asl < -0.5:
+                    m_asl=-0.5
+                if m_asl > 2.0:
+                    m_asl=2.0
                 cbf_cbf0_est[ii,jj,kk] = 1 + m_asl
+
                 
-                #quant cbf0 calculation including reductin in inversion efficiency due to to BGS inversion pulses
+                #quant cbf0 calculation including reduction in inversion efficiency due to to BGS inversion pulses
                 cbf0_est[ii,jj,kk] = (6000 * 0.9 * b_asl * np.exp(pld_slice/1.65)) / (2*0.85*0.9025* 1.6 *m0[ii,jj,kk] * (1-np.exp(-tag/1.65))  )
                 #exhaustive search for OEF value
                 oef_est[ii,jj,kk], MTTcap_est[ii,jj,kk], M_est[ii,jj,kk]  = my_exhaustive_search(cbf0_est[ii,jj,kk], CaO20, CaO2, Hb, GE_TE, p50, h, beta, PmitO2, phi ,rho, ge_est[ii,jj,kk], cbf_cbf0_est[ii,jj,kk], A, k_perm)
@@ -474,98 +511,6 @@ for ii in range(x_axis):
                 cbf_cbf0_est[ii,jj,kk] = 0
                 cbf0_est[ii,jj,kk] = 0
 
-
-# bespoke 'salt and pepper' demoising on oef images - simple thresholding on the OEF image to define noise (with patch size constraint for salt noise)
-def salt_pepper_denoise (oef_data,m0_data):
-    # denoises with 2 different patch sizes (3*3 and 5*5) - first for isolated voxels - then small clusters or lines
-    # preserves connected patches and ROIs e.g. WM data and surface veins
-
-    # want to use mask instead of m0 really
-
-    # also could identify salt and pepper noise by looking for values below or above a local patch median ... maybe do this after simple threshold based denoising
-    # this could smooth out the final map a bit better.... but could also hide local variation.
-    Ns=0.70 
-    Np=0.01
-
-    #define a new array that will hold the de-noised data
-    oef_filled=np.copy(oef_data)
-
-    pepper_mask=np.copy(oef_data)
-    pepper_mask[pepper_mask<Np]=-1
-    pepper_mask[pepper_mask>-1]=-2
-    pepper_mask=pepper_mask+2
-
-    salt_mask=np.copy(oef_data)
-    salt_mask[salt_mask<Ns]=0
-    salt_mask[salt_mask>0]=1
-
-    noise_mask=salt_mask+pepper_mask
-    noise_mask[noise_mask>1]=1
-
-    #need to remove voxels from outside the brain so not smoothing in zeros
-    pepper_mask[m0_data<6000]=0
-    salt_mask[m0_data<6000]=0
-    noise_mask[m0_data<6000]=0
-
-
-    # isolated voxels
-    for ii in range(2,x_axis-2): # avoid edge voxels
-        for jj in range(2,y_axis-2):      
-            for kk in range(no_slices):
-                if pepper_mask[ii,jj,kk]>0  and np.sum( pepper_mask[ii-1:ii+2,jj-1:jj+2,kk] ) <2:            
-                    no_valid_voxels= 9 - np.sum( noise_mask[ii-1:ii+2,jj-1:jj+2,kk] ) # number of voxels that are not noise
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        oef_filled[ii,jj,kk]= (oef_data[ii,jj-1,kk] * (1-noise_mask[ii,jj-1,kk])  + oef_data[ii-1,jj-1,kk] * (1-noise_mask[ii-1,jj-1,kk])  + oef_data[ii+1,jj-1,kk] * (1-noise_mask[ii+1,jj-1,kk]) + oef_data[ii-1,jj,kk] * (1-noise_mask[ii-1,jj,kk])  + oef_data[ii+1,jj,kk] * (1-noise_mask[ii+1,jj,kk]) + oef_data[ii,jj+1,kk] * (1-noise_mask[ii,jj+1,kk] ) + oef_data[ii-1,jj+1,kk] * (1-noise_mask[ii-1,jj+1,kk] )  + oef_data[ii+1,jj+1,kk] * (1-noise_mask[ii+1,jj+1,kk] )  ) / no_valid_voxels
-            
-
-                if salt_mask[ii,jj,kk]>0  and np.sum( salt_mask[ii-1:ii+2,jj-1:jj+2,kk] ) <2:  # max 1 voxels in a 3x3 grid 
-                    no_valid_voxels= 9 - np.sum( noise_mask[ii-1:ii+2,jj-1:jj+2,kk] ) # number of voxels that are not noise
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        oef_filled[ii,jj,kk]= (oef_data[ii,jj-1,kk] * (1-noise_mask[ii,jj-1,kk])  + oef_data[ii-1,jj-1,kk] * (1-noise_mask[ii-1,jj-1,kk])  + oef_data[ii+1,jj-1,kk] * (1-noise_mask[ii+1,jj-1,kk]) + oef_data[ii-1,jj,kk] * (1-noise_mask[ii-1,jj,kk])  + oef_data[ii+1,jj,kk] * (1-noise_mask[ii+1,jj,kk]) + oef_data[ii,jj+1,kk] * (1-noise_mask[ii,jj+1,kk] ) + oef_data[ii-1,jj+1,kk] * (1-noise_mask[ii-1,jj+1,kk] )  + oef_data[ii+1,jj+1,kk] * (1-noise_mask[ii+1,jj+1,kk] )  ) / no_valid_voxels
-
-    
-    # rebuild mask to get voxels from small clusters or short lines - only allow cluster size of 2 to maintain local variation
-    oef_filled=np.nan_to_num(oef_filled)
-    oef_data=np.copy(oef_filled)
-
-    pepper_mask=np.copy(oef_data)
-    pepper_mask[pepper_mask<Np]=-1
-    pepper_mask[pepper_mask>-1]=-2
-    pepper_mask=pepper_mask+2
-
-    salt_mask=np.copy(oef_data)
-    salt_mask[salt_mask<Ns]=0
-    salt_mask[salt_mask>0]=1
-
-    noise_mask=salt_mask+pepper_mask
-    noise_mask[noise_mask>1]=1
-    #need to remove voxels from outside the brain so not smoothing in zeros
-    pepper_mask[m0_data<6000]=0
-    salt_mask[m0_data<6000]=0
-    noise_mask[m0_data<6000]=0
-
-    for ii in range(2,x_axis-2): # avoid edge voxels
-        for jj in range(2,y_axis-2):      
-            for kk in range(no_slices):
-                if pepper_mask[ii,jj,kk]>0  and np.sum( pepper_mask[ii-2:ii+3,jj-2:jj+3,kk] ) <3:  # max 2 voxels in a 5x5 grid (the centre voxel + 2 others)
-                #take avergae of the surrounding voxels ...  excluding masked voxels (i.e. either salt or pepper noise)                
-                    no_valid_voxels= 9 - np.sum( noise_mask[ii-1:ii+2,jj-1:jj+2,kk] ) # number of voxels that are not noise
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        oef_filled[ii,jj,kk]= (oef_data[ii,jj-1,kk] * (1-noise_mask[ii,jj-1,kk])  + oef_data[ii-1,jj-1,kk] * (1-noise_mask[ii-1,jj-1,kk])  + oef_data[ii+1,jj-1,kk] * (1-noise_mask[ii+1,jj-1,kk]) + oef_data[ii-1,jj,kk] * (1-noise_mask[ii-1,jj,kk])  + oef_data[ii+1,jj,kk] * (1-noise_mask[ii+1,jj,kk]) + oef_data[ii,jj+1,kk] * (1-noise_mask[ii,jj+1,kk] ) + oef_data[ii-1,jj+1,kk] * (1-noise_mask[ii-1,jj+1,kk] )  + oef_data[ii+1,jj+1,kk] * (1-noise_mask[ii+1,jj+1,kk] )  ) / no_valid_voxels
-            
-                if salt_mask[ii,jj,kk]>0  and np.sum( salt_mask[ii-2:ii+3,jj-2:jj+3,kk] ) <3:  # max 2 voxels in a 5x5 grid (the centre voxel + 2 others)
-                    no_valid_voxels= 9 - np.sum( noise_mask[ii-1:ii+2,jj-1:jj+2,kk] ) # number of voxels that are not noise
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        oef_filled[ii,jj,kk]= (oef_data[ii,jj-1,kk] * (1-noise_mask[ii,jj-1,kk])  + oef_data[ii-1,jj-1,kk] * (1-noise_mask[ii-1,jj-1,kk])  + oef_data[ii+1,jj-1,kk] * (1-noise_mask[ii+1,jj-1,kk]) + oef_data[ii-1,jj,kk] * (1-noise_mask[ii-1,jj,kk])  + oef_data[ii+1,jj,kk] * (1-noise_mask[ii+1,jj,kk]) + oef_data[ii,jj+1,kk] * (1-noise_mask[ii,jj+1,kk] ) + oef_data[ii-1,jj+1,kk] * (1-noise_mask[ii-1,jj+1,kk] )  + oef_data[ii+1,jj+1,kk] * (1-noise_mask[ii+1,jj+1,kk] )  ) / no_valid_voxels
-
-    
-    oef_filled=np.nan_to_num(oef_filled)
-
-    return(oef_filled, salt_mask, pepper_mask)
-
-# salt and pepper denoising - remove isolated voxels and small clusters
-print('salt and pepper denoise')
-oef_est, salt_mask, pepper_mask = salt_pepper_denoise (oef_est,m0)
 
 
 cbf0_est[cbf0_est<0]=0
@@ -582,12 +527,49 @@ cbv_dhb = (rho * CaO20 * 39.34 * cbf0_est * oef_est) / (k_perm * (p50*( (2/oef_e
 M_diff = GE_TE * A * (cbv_dhb/100) * ( (1-SvO2) * Hb) ** beta   
 MTTcap_est = 60 * (cbv_dhb/rho)/cbf0_est # re-calculate MTTcap 
 
+#remove any nan's
+MTTcap_est=np.nan_to_num(MTTcap_est)
 
 # save data out to nifti files 
 empty_header=nib.Nifti1Header()
 
-#salt_mask_img=nib.Nifti1Image(salt_mask, mas_img.affine, empty_header)
-#nib.save(salt_mask_img, 'salt_mask.nii.gz')
+
+# calculate parameter estimates within the perfusion mask - equivalent to GM estimates (I would assume but without registration errors)
+oef_gm = np.multiply(oef_est, valid_mask);
+oef_gm_nan=np.copy(oef_gm)
+
+oef_gm_nan[oef_gm_nan <= 0] = np.nan
+oef_mean=np.nanmean(oef_gm_nan)
+
+print('oef_mean')
+print(oef_mean)
+
+cbf_gm = np.multiply(cbf0_est, valid_mask);
+cbf_gm[cbf_gm <= 0] = np.nan
+cbf_mean=np.nanmean(cbf_gm)
+
+print('cbf_mean')
+print(cbf_mean)
+
+cmro2_gm = np.multiply(cmro2_est, valid_mask);
+cmro2_gm[cmro2_gm <= 0] = np.nan
+cmro2_mean=np.nanmean(cmro2_gm)
+
+print('cmro2_mean')
+print(cmro2_mean)
+
+M_diff_gm = np.multiply(M_diff, valid_mask);
+M_diff_gm[M_diff_gm <= 0] = np.nan
+M_diff_mean=np.nanmean(M_diff_gm)
+
+print('M_diff_mean')
+print(M_diff_mean)
+
+
+# save out gm / valid voxel mask
+
+GMmask_img=nib.Nifti1Image(valid_mask, mas_img.affine, empty_header)
+nib.save( GMmask_img, os.path.join(out_folder, 'GMmask.nii.gz') )
 
 MTTcap_est_img=nib.Nifti1Image(MTTcap_est, mas_img.affine, empty_header)
 nib.save( MTTcap_est_img, os.path.join(out_folder, 'MTTcap_est.nii.gz') )
@@ -601,6 +583,11 @@ nib.save( ge_est_img, os.path.join(out_folder, 'ge_est.nii.gz') )
 cbf0_est_img=nib.Nifti1Image(cbf0_est, mas_img.affine, empty_header)
 nib.save( cbf0_est_img, os.path.join(out_folder, 'cbf0_est.nii.gz') )
 
+# create masked perfusion image
+cbf0_gm=np.multiply(cbf0_est, valid_mask);
+cbf0_gm_est_img=nib.Nifti1Image(cbf0_gm, mas_img.affine, empty_header)
+nib.save( cbf0_gm_est_img, os.path.join(out_folder, 'cbf0_gm_est.nii.gz') )
+
 cbf_cbf0_est_img=nib.Nifti1Image(cbf_cbf0_est, mas_img.affine, empty_header)
 nib.save( cbf_cbf0_est_img, os.path.join(out_folder, 'cbf_cbf0_est.nii.gz') )
 
@@ -612,3 +599,6 @@ nib.save( cmro2_est_img, os.path.join(out_folder, 'cmro2_est.nii.gz') )
 
 oef_est_img=nib.Nifti1Image(oef_est, mas_img.affine, empty_header)
 nib.save( oef_est_img, os.path.join(out_folder, 'oef_est.nii.gz') )
+
+oef_est_gm_img=nib.Nifti1Image(oef_gm, mas_img.affine, empty_header)
+nib.save( oef_est_gm_img, os.path.join(out_folder, 'oef_gm.nii.gz') )
